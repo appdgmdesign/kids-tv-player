@@ -8,22 +8,20 @@
   <title>Reproductor</title>
   <style>
     html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-    #yt { position: fixed; inset: 0; width: 100vw; height: 100vh; border: 0; }
-    /* ESCUDO invisible por encima del vídeo: intercepta TODO clic/puntero del
-       mando para que el niño no pueda tocar el logo de YouTube, "Más vídeos",
-       ni salir a la app de YouTube. El vídeo se ve a través (es transparente). */
-    #shield { position: fixed; inset: 0; z-index: 2147483647; background: transparent; }
+    /* pointer-events:none -> el iframe NO recibe ningún clic ni hover del mando:
+       así la UI de YouTube (logo, "Más vídeos", "Ver en YouTube") NO aparece y
+       es imposible de pulsar. El vídeo se ve y se oye con normalidad. */
+    #yt { position: fixed; inset: 0; width: 100vw; height: 100vh; border: 0; pointer-events: none; }
   </style>
 </head>
 <body>
   <!--
     Página-reproductor para la app Kids YouTube (webOS). Genérica y sin secretos.
-    Embed PLANO de YouTube (no la API YT.Player) servido por https: así YouTube
-    recibe un Referer válido y reproduce (sin Error 153). Autoplay con sonido.
-    Un ESCUDO invisible encima bloquea toda interacción con la UI de YouTube.
-    Avisa al padre (la app) con {type:'ended'} al terminar o justo antes (endCut).
+    Embed PLANO de YouTube servido por https (evita el Error 153). Autoplay con
+    sonido. El iframe va en pointer-events:none para que el niño no pueda tocar ni
+    ver la UI de YouTube (no hay forma de salir a YouTube). Avisa al padre con
+    {type:'ended'} al terminar o justo antes del final (endCut) para pasar de vídeo.
   -->
-  <div id="shield"></div>
   <script>
   (function () {
     "use strict";
@@ -52,7 +50,7 @@
       frame.allow = 'autoplay; fullscreen';
       frame.setAttribute('referrerpolicy', 'origin');
       frame.src = embedUrl(id);
-      document.body.insertBefore(frame, document.getElementById('shield')); // iframe DEBAJO del escudo
+      document.body.appendChild(frame);
       frame.addEventListener('load', function () {
         clearHs();
         hs = setInterval(function () {
