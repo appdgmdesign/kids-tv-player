@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Enviar el origen (https) como Referer: esto es lo que evita el Error 153 de YouTube. -->
+  <meta name="referrer" content="origin">
+  <title>Reproductor</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    #p, #p iframe { width: 100vw; height: 100vh; border: 0; display: block; }
+  </style>
+</head>
+<body>
+  <!--
+    Página-reproductor para la app Kids YouTube (webOS).
+    Genérica y sin secretos: solo recibe el id de un vídeo (por postMessage o por #hash)
+    y lo reproduce con YouTube, bloqueando controles y cortando antes del final para no
+    mostrar sugerencias. Debe servirse por HTTPS (p.ej. en tu dominio de Cloudflare).
+    Avisa al padre (la app) cuando el vídeo termina, para que pase al siguiente.
+  -->
+  <div id="p"></div>
+  <script>
+  (function () {
+    "use strict";
+    var player = null, ready = false, endCut = 4, curId = null, watcher = null, pending = null;
+
+    function post(msg) { try { parent.postMessage(JSON.stringify(msg), '*'); } catch (e) {} }
+
+    var hashId = (location.hash || '').replace(/^#/, '').trim(); // fallback: id por URL
+
+    window.onYouTubeIframeAPIReady = function () {
+      player = new YT.Player('p', {
+        width: '100%', height: '100%',
+        videoId: hashId || undefined,
+        playerVars: {
+          autoplay: 1, controls: 0, rel: 0, modestbranding: 1,
+          iv_load_policy: 3, fs: 0, disablekb: 1, playsinline: 1
+        },
+        events: {
+          onReady: function () {
+            ready = true; post({ type: 'ready' });
+            if (pending) { load(pending); pending = null; }
+            else if (hashId) { curId = hashId; start(); }
+          },
+          onStateChange: function (e) {
+            if (e.data === YT.PlayerState.ENDED) ended();
+            else if (e.data === YT.PlayerState.PLAYING) startWatch();
+          },
+          onError: function (e) { post({ type: 'error', code: e.data, videoId: curId }); }
+        }
+      });
+    };
+
+    function start() { try { player.playVideo(); } catch (e) {} startWatch(); }
+    function load(id) {
+      curId = id;
+      if (!ready) { pending = id; return; }
+      try { player.loadVideoById(id); } catch (e) {}
+      start();
+    }
+    function ended() { stopWatch(); post({ type: 'ended', videoId: curId }); }
+    function startWatch() {
+      stopWatch();
+      watcher = setInterval(function () {
+        if (!player || !player.getDuration) return;
+        var d = player.getDuration(), t = player.getCurrentTime();
+        if (d > 0 && t >= d - endCut) ended();
+      }, 300);
+    }
+    function stopWatch() { if (watcher) { clearInterval(watcher); watcher = null; } }
+
+    window.addEventListener('message', function (ev) {
+      var m; try { m = (typeof ev.data === 'string') ? JSON.parse(ev.data) : ev.data; } catch (e) { return; }
+      if (!m || !m.type) return;
+      if (m.type === 'load') { if (typeof m.endCut === 'number') endCut = m.endCut; load(m.videoId); }
+      else if (m.type === 'stop') { stopWatch(); try { player.stopVideo(); } catch (e) {} }
+      else if (m.type === 'pause') { try { player.pauseVideo(); } catch (e) {} }
+    });
+
+    var s = document.createElement('script');
+    s.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(s);
+  })();
+  </script>
+</body>
+</html>
