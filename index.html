@@ -3,84 +3,100 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <!-- Enviar el origen (https) como Referer: esto es lo que evita el Error 153 de YouTube. -->
+  <!-- Enviar el origen (https) como Referer: esto evita el Error 153 de YouTube. -->
   <meta name="referrer" content="origin">
   <title>Reproductor</title>
   <style>
     html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
-    #p, #p iframe { width: 100vw; height: 100vh; border: 0; display: block; }
+    iframe { position: fixed; inset: 0; width: 100vw; height: 100vh; border: 0; }
   </style>
 </head>
 <body>
   <!--
-    Página-reproductor para la app Kids YouTube (webOS).
-    Genérica y sin secretos: solo recibe el id de un vídeo (por postMessage o por #hash)
-    y lo reproduce con YouTube, bloqueando controles y cortando antes del final para no
-    mostrar sugerencias. Debe servirse por HTTPS (p.ej. en tu dominio de Cloudflare).
-    Avisa al padre (la app) cuando el vídeo termina, para que pase al siguiente.
+    Página-reproductor para la app Kids YouTube (webOS). Genérica y sin secretos.
+    Usa un EMBED PLANO de YouTube (no la API YT.Player, que falla dentro de un
+    iframe anidado en una app file://). Al tener esta página origen https, YouTube
+    recibe un Referer válido y reproduce (sin Error 153).
+    - Autoplay garantizado con mute=1, y luego quita el silencio por el canal jsapi.
+    - Avisa al padre (la app) con {type:'ended'} al terminar o justo antes del final
+      (endCut) para que pase al siguiente vídeo sin mostrar sugerencias.
   -->
-  <div id="p"></div>
   <script>
   (function () {
     "use strict";
-    var player = null, ready = false, endCut = 4, curId = null, watcher = null, pending = null;
+    var ORIGIN = location.origin;
+    var frame = null, endCut = 4, curId = null, hs = null, kicked = false;
 
-    function post(msg) { try { parent.postMessage(JSON.stringify(msg), '*'); } catch (e) {} }
+    function post(m) { try { parent.postMessage(JSON.stringify(m), '*'); } catch (e) {} }
+    function cmd(func, args) {
+      if (frame && frame.contentWindow) {
+        try { frame.contentWindow.postMessage(JSON.stringify({ event: 'command', func: func, args: args || [] }), '*'); } catch (e) {}
+      }
+    }
+    function embedUrl(id) {
+      return 'https://www.youtube.com/embed/' + encodeURIComponent(id) +
+        '?autoplay=1&mute=1&controls=0&rel=0&modestbranding=1&iv_load_policy=3' +
+        '&fs=0&disablekb=1&playsinline=1&enablejsapi=1' +
+        '&origin=' + encodeURIComponent(ORIGIN) + '&widget_referrer=' + encodeURIComponent(ORIGIN);
+    }
+    function clearHs() { if (hs) { clearInterval(hs); hs = null; } }
 
-    var hashId = (location.hash || '').replace(/^#/, '').trim(); // fallback: id por URL
-
-    window.onYouTubeIframeAPIReady = function () {
-      player = new YT.Player('p', {
-        width: '100%', height: '100%',
-        videoId: hashId || undefined,
-        playerVars: {
-          autoplay: 1, controls: 0, rel: 0, modestbranding: 1,
-          iv_load_policy: 3, fs: 0, disablekb: 1, playsinline: 1
-        },
-        events: {
-          onReady: function () {
-            ready = true; post({ type: 'ready' });
-            if (pending) { load(pending); pending = null; }
-            else if (hashId) { curId = hashId; start(); }
-          },
-          onStateChange: function (e) {
-            if (e.data === YT.PlayerState.ENDED) ended();
-            else if (e.data === YT.PlayerState.PLAYING) startWatch();
-          },
-          onError: function (e) { post({ type: 'error', code: e.data, videoId: curId }); }
-        }
-      });
-    };
-
-    function start() { try { player.playVideo(); } catch (e) {} startWatch(); }
     function load(id) {
-      curId = id;
-      if (!ready) { pending = id; return; }
-      try { player.loadVideoById(id); } catch (e) {}
-      start();
+      curId = id; kicked = false; clearHs();
+      if (frame && frame.parentNode) frame.parentNode.removeChild(frame);
+      frame = document.createElement('iframe');
+      frame.allow = 'autoplay; fullscreen';
+      frame.setAttribute('referrerpolicy', 'origin');
+      frame.src = embedUrl(id);
+      document.body.appendChild(frame);
+      // "Handshake" jsapi: pedimos escuchar hasta que el embed responda.
+      frame.addEventListener('load', function () {
+        clearHs();
+        hs = setInterval(function () {
+          if (frame && frame.contentWindow) {
+            try { frame.contentWindow.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), '*'); } catch (e) {}
+          }
+        }, 250);
+      });
     }
-    function ended() { stopWatch(); post({ type: 'ended', videoId: curId }); }
-    function startWatch() {
-      stopWatch();
-      watcher = setInterval(function () {
-        if (!player || !player.getDuration) return;
-        var d = player.getDuration(), t = player.getCurrentTime();
-        if (d > 0 && t >= d - endCut) ended();
-      }, 300);
+    function stop() {
+      clearHs();
+      if (frame && frame.parentNode) frame.parentNode.removeChild(frame);
+      frame = null; curId = null;
     }
-    function stopWatch() { if (watcher) { clearInterval(watcher); watcher = null; } }
 
+    // Mensajes de la app (padre).
     window.addEventListener('message', function (ev) {
       var m; try { m = (typeof ev.data === 'string') ? JSON.parse(ev.data) : ev.data; } catch (e) { return; }
       if (!m || !m.type) return;
       if (m.type === 'load') { if (typeof m.endCut === 'number') endCut = m.endCut; load(m.videoId); }
-      else if (m.type === 'stop') { stopWatch(); try { player.stopVideo(); } catch (e) {} }
-      else if (m.type === 'pause') { try { player.pauseVideo(); } catch (e) {} }
+      else if (m.type === 'stop') { stop(); }
     });
 
-    var s = document.createElement('script');
-    s.src = 'https://www.youtube.com/iframe_api';
-    document.head.appendChild(s);
+    // Mensajes del embed de YouTube (enablejsapi).
+    window.addEventListener('message', function (ev) {
+      if (String(ev.origin).indexOf('youtube') === -1) return;
+      var d; try { d = (typeof ev.data === 'string') ? JSON.parse(ev.data) : ev.data; } catch (e) { return; }
+      if (!d || !d.event) return;
+
+      // En cuanto el embed responde: quitamos silencio, subimos volumen interno y aseguramos play.
+      if (d.event === 'onReady' || d.event === 'initialDelivery' || d.event === 'infoDelivery') {
+        clearHs();
+        if (!kicked) { kicked = true; cmd('unMute'); cmd('setVolume', [100]); cmd('playVideo'); }
+      }
+      // Fin del vídeo o corte antes del final -> avisar al padre.
+      if (d.event === 'infoDelivery' && d.info) {
+        var i = d.info;
+        if (i.playerState === 0) post({ type: 'ended', videoId: curId });
+        else if (typeof i.currentTime === 'number' && typeof i.duration === 'number' &&
+                 i.duration > 0 && i.currentTime >= i.duration - endCut) {
+          post({ type: 'ended', videoId: curId });
+        }
+      }
+      if (d.event === 'onStateChange' && d.info === 0) post({ type: 'ended', videoId: curId });
+    });
+
+    post({ type: 'ready' });
   })();
   </script>
 </body>
